@@ -372,7 +372,7 @@ function Get-GitHubRelease {
         Write-Host "  │ 4. Re-executar o script (usará cache automaticamente)    │" -ForegroundColor Yellow
         Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
         Write-Host ""
-        Write-LogJsonl -Level "WARN" -Message "$toolName: host de download bloqueado ($downloadHost)" -Extra @{
+        Write-LogJsonl -Level "WARN" -Message "${toolName}: host de download bloqueado ($downloadHost)" -Extra @{
             download_url = $assetUrl
             manual_dest  = $manualPath
         }
