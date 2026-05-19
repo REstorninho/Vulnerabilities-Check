@@ -267,11 +267,32 @@ if ($NoNvd)        { Write-Warn "NVD lookup desactivado" }
 
 function Safe-Download {
     param([string]$Url, [string]$Dest, [int]$MinBytes = 10240)
+    # Tentar 1: Invoke-WebRequest com proxy do sistema
+    try {
+        $wc = [System.Net.WebRequest]::GetSystemWebProxy()
+        $wc.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+        Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -TimeoutSec 90 `
+            -Proxy ($wc.GetProxy($Url)) -ProxyUseDefaultCredentials -ErrorAction Stop
+        if ((Test-Path $Dest) -and (Get-Item $Dest).Length -ge $MinBytes) { return $true }
+        Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+    } catch {}
+    # Tentar 2: Invoke-WebRequest sem proxy explícito
     try {
         Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -TimeoutSec 90 -ErrorAction Stop
         if ((Test-Path $Dest) -and (Get-Item $Dest).Length -ge $MinBytes) { return $true }
         Remove-Item $Dest -Force -ErrorAction SilentlyContinue
-    } catch { Write-Warn "  Download falhou: $($_.Exception.Message)" }
+    } catch {}
+    # Tentar 3: .NET WebClient (usa configuração de proxy do sistema automaticamente)
+    try {
+        $wc = New-Object System.Net.WebClient
+        $wc.UseDefaultCredentials = $true
+        $wc.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+        $wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+        $wc.DownloadFile($Url, $Dest)
+        if ((Test-Path $Dest) -and (Get-Item $Dest).Length -ge $MinBytes) { return $true }
+        Remove-Item $Dest -Force -ErrorAction SilentlyContinue
+    } catch {}
+    Write-Warn "  Download falhou: $Url"
     return $false
 }
 
@@ -513,9 +534,18 @@ if (-not (Test-Path $GrypeBin) -or $Force) {
 
 # ── OSV-Scanner ───────────────────────────────────────────────────
 $OsvBin = "$Tools\osv-scanner.exe"
-if (-not (Test-Path $OsvBin) -and -not $SkipDownload) {
-    # Tentar obter versão mais recente via GitHub API; fallback para versão conhecida
-    $OsvVer = "1.9.2"  # fallback hardcoded — actualizar se necessário
+$OsvCmd = $null  # path final para o binário (pode ser fora de tools\)
+
+# Verificar se já está em cache ou no PATH
+if (Test-Path $OsvBin) {
+    $OsvCmd = $OsvBin
+    Write-Info "OSV-Scanner — cache OK"
+} elseif (Get-Command osv-scanner -ErrorAction SilentlyContinue) {
+    $OsvCmd = (Get-Command osv-scanner).Source
+    Write-Info "OSV-Scanner — sistema OK ($OsvCmd)"
+} elseif (-not $SkipDownload) {
+    # Tentar 1: GitHub release (binário directo)
+    $OsvVer = "2.3.8"  # fallback hardcoded — actualizar se necessário
     try {
         $rel = Invoke-RestMethod "https://api.github.com/repos/google/osv-scanner/releases/latest" -TimeoutSec 15 -ErrorAction Stop
         $OsvVer = $rel.tag_name.TrimStart("v")
@@ -523,20 +553,97 @@ if (-not (Test-Path $OsvBin) -and -not $SkipDownload) {
     } catch {
         Write-Warn "  OSV-Scanner: GitHub API inacessível — a usar versão fallback $OsvVer"
     }
-    $url = "https://github.com/google/osv-scanner/releases/download/v${OsvVer}/osv-scanner_windows-amd64.exe"
-    Ensure-Tool "OSV-Scanner" $OsvBin @($url) 10000000 | Out-Null
-} elseif (Test-Path $OsvBin) { Write-Info "OSV-Scanner — cache OK" }
+    $osvUrl = "https://github.com/google/osv-scanner/releases/download/v${OsvVer}/osv-scanner_windows-amd64.exe"
+    if (Ensure-Tool "OSV-Scanner" $OsvBin @($osvUrl) 10000000) {
+        $OsvCmd = $OsvBin
+    } else {
+        # Tentar 2: winget
+        Write-Info "  OSV-Scanner: a tentar instalação via winget..."
+        try {
+            $wg = Get-Command winget -ErrorAction SilentlyContinue
+            if ($wg) {
+                & winget install --id Google.OSVScanner --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
+                $osvInPath = Get-Command osv-scanner -ErrorAction SilentlyContinue
+                if ($osvInPath) {
+                    $OsvCmd = $osvInPath.Source
+                    Write-Info "  OSV-Scanner instalado via winget: $OsvCmd"
+                }
+            }
+        } catch {}
+        # Tentar 3: pip (osv-scanner disponível como package Python)
+        if (-not $OsvCmd) {
+            Write-Info "  OSV-Scanner: a tentar instalação via pip..."
+            try {
+                $pipCmd = @("pip","pip3") | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+                if ($pipCmd) {
+                    & $pipCmd install osv-scanner 2>&1 | Out-Null
+                    $osvInPath = Get-Command osv-scanner -ErrorAction SilentlyContinue
+                    if ($osvInPath) {
+                        $OsvCmd = $osvInPath.Source
+                        Write-Info "  OSV-Scanner instalado via pip: $OsvCmd"
+                    }
+                }
+            } catch {}
+        }
+        if (-not $OsvCmd) {
+            Write-Warn "  OSV-Scanner: todos os métodos falharam — lock file scan será saltado"
+        }
+    }
+}
 
 # ── Watson ────────────────────────────────────────────────────────
 $WatsonBin = "$Tools\Watson.exe"
-if (-not (Test-Path $WatsonBin) -and -not $SkipDownload) {
-    # Múltiplos mirrors + fallback para versão conhecida no GitHub CDN
-    Ensure-Tool "Watson" $WatsonBin @(
+$WatsonCmd = $null
+
+if (Test-Path $WatsonBin) {
+    $WatsonCmd = $WatsonBin
+    Write-Info "Watson — cache OK"
+} elseif (Get-Command Watson -ErrorAction SilentlyContinue) {
+    $WatsonCmd = (Get-Command Watson).Source
+    Write-Info "Watson — sistema OK"
+} elseif (-not $SkipDownload) {
+    # Tentar múltiplos mirrors GitHub
+    $watsonUrls = @(
         "https://github.com/r3motecontrol/Ghostpack-CompiledBinaries/raw/master/dotnet%20v4.5%20compiled%20binaries/Watson.exe",
-        "https://github.com/kraloveckey/ghostpack-binaries/raw/main/Windows/Watson.exe",
-        "https://raw.githubusercontent.com/BC-SECURITY/Empire/main/empire/server/data/module_source/privesc/Watson.exe"
-    ) 50000 | Out-Null
-} elseif (Test-Path $WatsonBin) { Write-Info "Watson — cache OK" }
+        "https://github.com/kraloveckey/ghostpack-binaries/raw/main/Windows/Watson.exe"
+    )
+    if (Ensure-Tool "Watson" $WatsonBin $watsonUrls 50000) {
+        $WatsonCmd = $WatsonBin
+    } else {
+        # Fallback: tentar compilar via dotnet se SDK disponível
+        Write-Info "  Watson: mirrors inacessíveis — a verificar dotnet SDK..."
+        $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
+        if ($dotnetCmd) {
+            try {
+                $watsonSrc = "$Tools\watson_src"
+                New-Item -ItemType Directory -Force -Path $watsonSrc | Out-Null
+                # Clonar via git se disponível (mais fiável que download directo)
+                $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+                if ($gitCmd) {
+                    & git clone --depth 1 "https://github.com/rasta-mouse/Watson.git" $watsonSrc 2>&1 | Out-Null
+                    if (Test-Path "$watsonSrc\Watson.csproj") {
+                        & dotnet publish "$watsonSrc\Watson.csproj" -c Release -o "$Tools\watson_out" 2>&1 | Out-Null
+                        $compiled = Get-ChildItem "$Tools\watson_out\Watson.exe" -ErrorAction SilentlyContinue
+                        if ($compiled) {
+                            Copy-Item $compiled.FullName $WatsonBin -Force
+                            $WatsonCmd = $WatsonBin
+                            Write-Info "  Watson compilado via dotnet OK"
+                        }
+                    }
+                }
+            } catch {
+                Write-Warn "  Watson: compilação falhou — CVEs inline cobrem os casos principais"
+            }
+        }
+        if (-not $WatsonCmd) {
+            Write-Warn "  Watson: não disponível — os CVEs inline na fase 11 continuam activos"
+        }
+    }
+}
+
+# Actualizar referência usada na fase 11 (patch gap)
+# Se WatsonCmd não foi definido, $WatsonBin fica como path para verificação (Test-Path falhará gracefully)
+if ($WatsonCmd) { $WatsonBin = $WatsonCmd }
 
 # ═══════════════════════════════════════════════════════════════════
 # FASE 2 — SCANS DE SEGURANÇA
