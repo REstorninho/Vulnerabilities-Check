@@ -534,9 +534,8 @@ if (-not (Test-Path $GrypeBin) -or $Force) {
 
 # ── OSV-Scanner ───────────────────────────────────────────────────
 $OsvBin = "$Tools\osv-scanner.exe"
-$OsvCmd = $null  # path final para o binário (pode ser fora de tools\)
+$OsvCmd = $null
 
-# Verificar se já está em cache ou no PATH
 if (Test-Path $OsvBin) {
     $OsvCmd = $OsvBin
     Write-Info "OSV-Scanner — cache OK"
@@ -544,50 +543,47 @@ if (Test-Path $OsvBin) {
     $OsvCmd = (Get-Command osv-scanner).Source
     Write-Info "OSV-Scanner — sistema OK ($OsvCmd)"
 } elseif (-not $SkipDownload) {
-    # Tentar 1: GitHub release (binário directo)
-    $OsvVer = "2.3.8"  # fallback hardcoded — actualizar se necessário
+    Write-Info "A determinar versão mais recente do OSV-Scanner (google)..."
+    $osvZip = "$Tools\osv_tmp.zip"
+    $osvTmp = "$Tools\osv_extracted"
     try {
+        # GitHub API — última release de google/osv-scanner
         $rel = Invoke-RestMethod "https://api.github.com/repos/google/osv-scanner/releases/latest" -TimeoutSec 15 -ErrorAction Stop
-        $OsvVer = $rel.tag_name.TrimStart("v")
-        Write-Info "OSV-Scanner versão mais recente: $OsvVer"
-    } catch {
-        Write-Warn "  OSV-Scanner: GitHub API inacessível — a usar versão fallback $OsvVer"
-    }
-    $osvUrl = "https://github.com/google/osv-scanner/releases/download/v${OsvVer}/osv-scanner_windows-amd64.exe"
-    if (Ensure-Tool "OSV-Scanner" $OsvBin @($osvUrl) 10000000) {
-        $OsvCmd = $OsvBin
-    } else {
-        # Tentar 2: winget
-        Write-Info "  OSV-Scanner: a tentar instalação via winget..."
-        try {
-            $wg = Get-Command winget -ErrorAction SilentlyContinue
-            if ($wg) {
-                & winget install --id Google.OSVScanner --accept-package-agreements --accept-source-agreements --silent 2>&1 | Out-Null
-                $osvInPath = Get-Command osv-scanner -ErrorAction SilentlyContinue
-                if ($osvInPath) {
-                    $OsvCmd = $osvInPath.Source
-                    Write-Info "  OSV-Scanner instalado via winget: $OsvCmd"
-                }
+        $osvVer = $rel.tag_name.TrimStart("v")
+
+        # Procurar asset ZIP windows-amd64 na release
+        $zipAsset = $rel.assets | Where-Object { $_.name -like "*windows*amd64*.zip" -or $_.name -like "*windows_amd64*.zip" } | Select-Object -First 1
+        $zipUrl   = if ($zipAsset) { $zipAsset.browser_download_url }
+                    else { "https://github.com/google/osv-scanner/releases/download/v${osvVer}/osv-scanner_${osvVer}_windows_amd64.zip" }
+
+        Write-Info "  OSV-Scanner v${osvVer} — a descarregar ZIP..."
+        if (Safe-Download -Url $zipUrl -Dest $osvZip -MinBytes 5000000) {
+            New-Item -ItemType Directory -Force -Path $osvTmp | Out-Null
+            Expand-Archive -Path $osvZip -DestinationPath $osvTmp -Force -ErrorAction Stop
+
+            # Procurar osv-scanner.exe dentro do ZIP (pode estar em subdirectório)
+            $exeFound = Get-ChildItem -Path $osvTmp -Filter "osv-scanner.exe" -Recurse -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+            if ($exeFound) {
+                Copy-Item $exeFound.FullName $OsvBin -Force
+                $OsvCmd = $OsvBin
+                $sz = [math]::Round((Get-Item $OsvBin).Length / 1MB, 1)
+                Write-Info "  OSV-Scanner v${osvVer} extraído OK ($sz MB)"
+            } else {
+                Write-Warn "  OSV-Scanner: ZIP descarregado mas osv-scanner.exe não encontrado dentro do arquivo"
             }
-        } catch {}
-        # Tentar 3: pip (osv-scanner disponível como package Python)
-        if (-not $OsvCmd) {
-            Write-Info "  OSV-Scanner: a tentar instalação via pip..."
-            try {
-                $pipCmd = @("pip","pip3") | Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
-                if ($pipCmd) {
-                    & $pipCmd install osv-scanner 2>&1 | Out-Null
-                    $osvInPath = Get-Command osv-scanner -ErrorAction SilentlyContinue
-                    if ($osvInPath) {
-                        $OsvCmd = $osvInPath.Source
-                        Write-Info "  OSV-Scanner instalado via pip: $OsvCmd"
-                    }
-                }
-            } catch {}
+        } else {
+            Write-Warn "  OSV-Scanner: download do ZIP falhou"
         }
-        if (-not $OsvCmd) {
-            Write-Warn "  OSV-Scanner: todos os métodos falharam — lock file scan será saltado"
-        }
+    } catch {
+        Write-Warn "  OSV-Scanner: $($_.Exception.Message)"
+    } finally {
+        Remove-Item $osvZip -Force -ErrorAction SilentlyContinue
+        Remove-Item $osvTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $OsvCmd) {
+        Write-Warn "  OSV-Scanner: não disponível — lock file scan será saltado"
     }
 }
 
@@ -602,47 +598,52 @@ if (Test-Path $WatsonBin) {
     $WatsonCmd = (Get-Command Watson).Source
     Write-Info "Watson — sistema OK"
 } elseif (-not $SkipDownload) {
-    # Tentar múltiplos mirrors GitHub
-    $watsonUrls = @(
-        "https://github.com/r3motecontrol/Ghostpack-CompiledBinaries/raw/master/dotnet%20v4.5%20compiled%20binaries/Watson.exe",
-        "https://github.com/kraloveckey/ghostpack-binaries/raw/main/Windows/Watson.exe"
-    )
-    if (Ensure-Tool "Watson" $WatsonBin $watsonUrls 50000) {
-        $WatsonCmd = $WatsonBin
-    } else {
-        # Fallback: tentar compilar via dotnet se SDK disponível
-        Write-Info "  Watson: mirrors inacessíveis — a verificar dotnet SDK..."
-        $dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
-        if ($dotnetCmd) {
-            try {
-                $watsonSrc = "$Tools\watson_src"
-                New-Item -ItemType Directory -Force -Path $watsonSrc | Out-Null
-                # Clonar via git se disponível (mais fiável que download directo)
-                $gitCmd = Get-Command git -ErrorAction SilentlyContinue
-                if ($gitCmd) {
-                    & git clone --depth 1 "https://github.com/rasta-mouse/Watson.git" $watsonSrc 2>&1 | Out-Null
-                    if (Test-Path "$watsonSrc\Watson.csproj") {
-                        & dotnet publish "$watsonSrc\Watson.csproj" -c Release -o "$Tools\watson_out" 2>&1 | Out-Null
-                        $compiled = Get-ChildItem "$Tools\watson_out\Watson.exe" -ErrorAction SilentlyContinue
-                        if ($compiled) {
-                            Copy-Item $compiled.FullName $WatsonBin -Force
-                            $WatsonCmd = $WatsonBin
-                            Write-Info "  Watson compilado via dotnet OK"
-                        }
-                    }
-                }
-            } catch {
-                Write-Warn "  Watson: compilação falhou — CVEs inline cobrem os casos principais"
+    Write-Info "A determinar versão mais recente do Watson (jazzband)..."
+    $watsonZip = "$Tools\watson_tmp.zip"
+    $watsonTmp = "$Tools\watson_extracted"
+    try {
+        # GitHub API — última release de jazzband/Watson
+        $rel = Invoke-RestMethod "https://api.github.com/repos/jazzband/Watson/releases/latest" -TimeoutSec 15 -ErrorAction Stop
+        $watsonVer = $rel.tag_name.TrimStart("v")
+
+        # Procurar asset ZIP na release
+        $zipAsset = $rel.assets | Where-Object { $_.name -like "*.zip" } | Select-Object -First 1
+        $zipUrl   = if ($zipAsset) { $zipAsset.browser_download_url }
+                    else { "https://github.com/jazzband/Watson/releases/download/v${watsonVer}/Watson.zip" }
+
+        Write-Info "  Watson v${watsonVer} — a descarregar ZIP ($zipUrl)..."
+        if (Safe-Download -Url $zipUrl -Dest $watsonZip -MinBytes 20000) {
+            New-Item -ItemType Directory -Force -Path $watsonTmp | Out-Null
+            Expand-Archive -Path $watsonZip -DestinationPath $watsonTmp -Force -ErrorAction Stop
+
+            # Procurar Watson.exe dentro do ZIP (pode estar em subdirectório)
+            $exeFound = Get-ChildItem -Path $watsonTmp -Filter "Watson.exe" -Recurse -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+            if ($exeFound) {
+                Copy-Item $exeFound.FullName $WatsonBin -Force
+                $WatsonCmd = $WatsonBin
+                $sz = [math]::Round((Get-Item $WatsonBin).Length / 1KB)
+                Write-Info "  Watson v${watsonVer} extraído OK ($sz KB)"
+            } else {
+                Write-Warn "  Watson: ZIP descarregado mas Watson.exe não encontrado dentro do arquivo"
             }
+        } else {
+            Write-Warn "  Watson: download do ZIP falhou"
         }
-        if (-not $WatsonCmd) {
-            Write-Warn "  Watson: não disponível — os CVEs inline na fase 11 continuam activos"
-        }
+    } catch {
+        Write-Warn "  Watson: $($_.Exception.Message)"
+    } finally {
+        # Limpar temporários independentemente do resultado
+        Remove-Item $watsonZip -Force -ErrorAction SilentlyContinue
+        Remove-Item $watsonTmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    if (-not $WatsonCmd) {
+        Write-Warn "  Watson: não disponível — os CVEs inline na fase 11 continuam activos"
     }
 }
 
-# Actualizar referência usada na fase 11 (patch gap)
-# Se WatsonCmd não foi definido, $WatsonBin fica como path para verificação (Test-Path falhará gracefully)
+# Actualizar referência usada na fase 11
 if ($WatsonCmd) { $WatsonBin = $WatsonCmd }
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1089,7 +1090,7 @@ $appOutput.Add("")
 
 # OSV-Scanner
 $appOutput.Add("══ OSV-SCANNER ══"); $appOutput.Add("")
-if (Test-Path $OsvBin) {
+if ($OsvCmd -and (Test-Path $OsvCmd)) {
     $lockPatterns = @("package-lock.json","yarn.lock","requirements.txt","Pipfile.lock","go.sum","Cargo.lock","packages.lock.json")
     $lockFiles = @(); $searchRoots = @($env:USERPROFILE,"$env:USERPROFILE\Documents","$env:USERPROFILE\Desktop","C:\inetpub","C:\Projects")
     foreach ($root in $searchRoots) {
@@ -1102,12 +1103,12 @@ if (Test-Path $OsvBin) {
         $appOutput.Add("Lock files encontrados: $($lockFiles.Count)")
         foreach ($lf in $lockFiles | Select-Object -First 15) {
             $appOutput.Add("  Scanning: $($lf.FullName)")
-            try { $appOutput.Add((& $OsvBin --format table --lockfile $lf.FullName 2>&1 | Out-String)) } catch {}
+            try { $appOutput.Add((& $OsvCmd --format table --lockfile $lf.FullName 2>&1 | Out-String)) } catch {}
         }
     } else { $appOutput.Add("Sem lock files encontrados") }
     $sbomOut = "$Out\12_sbom.cdx.json"
-    try { & $OsvBin scan --format cyclonedx-1-4 --output $sbomOut 2>&1 | Out-Null; if (Test-Path $sbomOut) { $appOutput.Add("SBOM: $sbomOut") } } catch {}
-} else { $appOutput.Add("[!] OSV-Scanner não disponível") }
+    try { & $OsvCmd scan --format cyclonedx-1-4 --output $sbomOut 2>&1 | Out-Null; if (Test-Path $sbomOut) { $appOutput.Add("SBOM: $sbomOut") } } catch {}
+} else { $appOutput.Add("[!] OSV-Scanner não disponível (GitHub bloqueado — tentar: winget install Google.OSVScanner)") }
 
 # Grype
 $appOutput.Add(""); $appOutput.Add("══ GRYPE ══"); $appOutput.Add("")
