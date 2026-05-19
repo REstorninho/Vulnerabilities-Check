@@ -52,11 +52,84 @@ $ProgressPreference    = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # ─── Helpers de output ────────────────────────────────────────────
-function Write-Info  { param($m) Write-Host "[+] $m" -ForegroundColor Green  }
-function Write-Warn  { param($m) Write-Host "[!] $m" -ForegroundColor Yellow }
-function Write-Err   { param($m) Write-Host "[X] $m" -ForegroundColor Red    }
-function Write-Step  { param($m) Write-Host "`n══════ $m ══════" -ForegroundColor Cyan }
-function Write-Sec   { param($m) Write-Host "`n─── $m ───" -ForegroundColor Cyan }
+# Counters globais para logging estruturado
+$Global:ErrorCount    = 0
+$Global:WarnCount     = 0
+$Global:CurrentPhase  = "init"
+
+function Write-Info  { param($m) Write-Host "[+] $m" -ForegroundColor Green }
+function Write-Warn  {
+    param($m, $extra = $null)
+    Write-Host "[!] $m" -ForegroundColor Yellow
+    Write-LogJsonl -Level "WARN" -Message $m -Extra $extra
+    $Global:WarnCount++
+}
+function Write-Err   {
+    param($m, $extra = $null)
+    Write-Host "[X] $m" -ForegroundColor Red
+    Write-LogJsonl -Level "ERROR" -Message $m -Extra $extra
+    $Global:ErrorCount++
+}
+function Write-Step  {
+    param($m)
+    $Global:CurrentPhase = $m
+    Write-Host "`n══════ $m ══════" -ForegroundColor Cyan
+    Write-LogJsonl -Level "INFO" -Message "Fase iniciada: $m"
+}
+function Write-Sec   {
+    param($m)
+    $Global:CurrentPhase = $m
+    Write-Host "`n─── $m ───" -ForegroundColor Cyan
+}
+
+# ─── Sistema de Logging Estruturado (JSON Lines) ──────────────────
+# Escreve em audit_events.log (tudo) e audit_errors.log (só ERROR/WARN)
+# Filtrar com PowerShell:
+#   Get-Content audit_events.log | ConvertFrom-Json | Where-Object Level -eq "ERROR"
+function Write-LogJsonl {
+    param(
+        [string]$Level,
+        [string]$Message,
+        [hashtable]$Extra = $null
+    )
+    # Só escreve se paths estão definidos e directório existe
+    if (-not $Global:EventLog -or -not (Test-Path (Split-Path $Global:EventLog -Parent))) { return }
+    $obj = [ordered]@{
+        timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        level     = $Level
+        phase     = $Global:CurrentPhase
+        message   = $Message
+    }
+    if ($Extra) {
+        foreach ($k in $Extra.Keys) { $obj[$k] = $Extra[$k] }
+    }
+    # Compact JSON numa linha
+    $line = $obj | ConvertTo-Json -Depth 5 -Compress
+    try {
+        Add-Content -Path $Global:EventLog -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($Level -eq "ERROR" -or $Level -eq "WARN") {
+            Add-Content -Path $Global:ErrorLog -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+# Wrapper para correr scriptblocks e logar excepções
+function Invoke-LoggedBlock {
+    param(
+        [string]$Label,
+        [scriptblock]$ScriptBlock,
+        [string]$Phase = $null
+    )
+    if ($Phase) { $Global:CurrentPhase = $Phase }
+    try {
+        & $ScriptBlock
+    } catch {
+        Write-Err "$Label : $($_.Exception.Message)" @{
+            exception = $_.Exception.GetType().Name
+            script_line = $_.InvocationInfo.ScriptLineNumber
+        }
+    }
+}
 
 if ($Help) {
     Write-Host @"
@@ -122,8 +195,31 @@ $GrypeJson   = "$Out\12_grype.json"
 $CveCsv      = "$Out\cve_results.csv"
 $CveSarif    = "$Out\cve_results.sarif"
 $DiffFile    = "$Out\diff_vs_previous.json"
+# Logs estruturados (JSON Lines)
+$Global:EventLog = "$Out\audit_events.log"
+$Global:ErrorLog = "$Out\audit_errors.log"
 
 New-Item -ItemType Directory -Force -Path $Out, $Tools | Out-Null
+
+# Inicializar logs — após mkdir
+"# audit_events.log - JSON Lines, todos os eventos" | Out-File $Global:EventLog -Encoding UTF8 -Force
+"# audit_errors.log - so ERROR e WARN" | Out-File $Global:ErrorLog -Encoding UTF8 -Force
+Write-LogJsonl -Level "INFO" -Message "Script iniciado" -Extra @{
+    version = "1.0"
+    args    = ($PSBoundParameters.Keys -join ",")
+    pid     = $PID
+}
+
+# Trap global — captura excepções não tratadas
+trap {
+    Write-LogJsonl -Level "ERROR" -Message "Excepção não-tratada: $($_.Exception.Message)" -Extra @{
+        exception   = $_.Exception.GetType().Name
+        script_line = $_.InvocationInfo.ScriptLineNumber
+        command     = $_.InvocationInfo.Line.Trim()
+    }
+    $Global:ErrorCount++
+    continue  # Não terminar — deixar o script tentar continuar
+}
 
 # Cache global Trivy/Grype DBs — persiste entre runs (#4)
 # Poupa ~600MB de download por run
@@ -1621,6 +1717,42 @@ if ($topFindings.Count -gt 0) {
     [void]$sb.AppendLine('</div>')
 }
 
+# Execution errors / warnings block — só aparece se houver
+if ($Global:ErrorCount -gt 0 -or $Global:WarnCount -gt 0) {
+    $errColor = if ($Global:ErrorCount -gt 0) { "var(--red)" } else { "var(--yellow)" }
+    $errBg    = if ($Global:ErrorCount -gt 0) { "rgba(248,81,73,.05)" } else { "rgba(210,153,34,.05)" }
+    [void]$sb.AppendLine("<div style=`"background:$errBg;border:1px solid $errColor;border-left:4px solid $errColor;border-radius:6px;padding:14px 18px;margin-bottom:14px`">")
+    [void]$sb.AppendLine("<h2 style=`"color:$errColor;font-size:.95em;margin-bottom:10px`">&#9888; Execution Issues &mdash; $($Global:ErrorCount) errors, $($Global:WarnCount) warnings</h2>")
+    [void]$sb.AppendLine("<div style=`"font-size:.82em;color:var(--dim);margin-bottom:8px`">Log estruturado: <code style=`"color:var(--cyan)`">$($Global:ErrorLog)</code></div>")
+
+    # Ler últimos 15 eventos do error log e mostrar tabela
+    if (Test-Path $Global:ErrorLog) {
+        try {
+            $logLines = Get-Content $Global:ErrorLog -Tail 15 -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -and -not $_.StartsWith("#") }
+            if ($logLines) {
+                [void]$sb.AppendLine('<details><summary style="cursor:pointer;color:var(--cyan);font-size:.85em">Ver últimos 15 eventos</summary>')
+                [void]$sb.AppendLine('<table class="vtable" style="margin-top:8px"><thead><tr><th>Hora</th><th>Nível</th><th>Fase</th><th>Mensagem</th></tr></thead><tbody>')
+                foreach ($line in $logLines) {
+                    try {
+                        $e = $line | ConvertFrom-Json
+                        $ts = $e.timestamp -replace 'T',' ' -replace 'Z',''
+                        $lvl = $e.level
+                        $msg = (Escape-Html $e.message)
+                        if ($msg.Length -gt 100) { $msg = $msg.Substring(0, 100) }
+                        $ph = Escape-Html $e.phase
+                        if ($ph.Length -gt 30) { $ph = $ph.Substring(0, 30) }
+                        $lvlColor = if ($lvl -eq "ERROR") { "var(--red)" } else { "var(--yellow)" }
+                        [void]$sb.AppendLine("<tr><td style=`"font-size:.75em;color:var(--dim)`">$ts</td><td><span style=`"color:$lvlColor;font-weight:bold`">$lvl</span></td><td style=`"color:var(--cyan);font-size:.78em`">$ph</td><td style=`"font-size:.8em`">$msg</td></tr>")
+                    } catch {}
+                }
+                [void]$sb.AppendLine('</tbody></table></details>')
+            }
+        } catch {}
+    }
+    [void]$sb.AppendLine('</div>')
+}
+
 # CVE Table (extraída dos .txt)
 if ($cveTable.Count -gt 0) {
     [void]$sb.AppendLine("<div class=`"category`"><div class=`"category-h`">&#128027; CVE Summary ($UniqCves únicos nos scans)</div>")
@@ -1854,11 +1986,16 @@ $summaryLines = @(
     "║  [Dash]   App upd   : $($AppUpdates.Count)"
     "║  Inventário         : $($Inventory.Count) apps conhecidas"
     "╠══════════════════════════════════════════════════╣"
+    "║  Execução  errors   : $($Global:ErrorCount)"
+    "║  Execução  warnings : $($Global:WarnCount)"
+    "╠══════════════════════════════════════════════════╣"
     "║  Relatório HTML : $Report"
     "║  Inventory JSON : $InvFile"
     "║  CVEs JSON      : $CveFile"
     "║  CVEs CSV       : $CveCsv"
     "║  CVEs SARIF     : $CveSarif"
+    "║  Event log      : $($Global:EventLog)"
+    "║  Error log      : $($Global:ErrorLog)"
 )
 if (Test-Path $DiffFile) {
     try {
@@ -1870,6 +2007,24 @@ if (Test-Path $DiffFile) {
 $summaryLines += "╚══════════════════════════════════════════════════╝"
 
 Write-Host "`n$($summaryLines -join "`n")" -ForegroundColor Cyan
+
+# Log final
+Write-LogJsonl -Level "INFO" -Message "Script terminado" -Extra @{
+    errors     = $Global:ErrorCount
+    warnings   = $Global:WarnCount
+    cves_total = $CveResults.Count
+}
+
+# Mensagem destacada se houve erros
+if ($Global:ErrorCount -gt 0) {
+    Write-Host "[!] " -ForegroundColor Red -NoNewline
+    Write-Host "Ocorreram $($Global:ErrorCount) erros e $($Global:WarnCount) avisos durante a execução."
+    Write-Host "    Ver: $($Global:ErrorLog)"
+    Write-Host "    Filtrar: Get-Content '$($Global:EventLog)' | ConvertFrom-Json | Where-Object level -eq 'ERROR'"
+} elseif ($Global:WarnCount -gt 0) {
+    Write-Host "[!] " -ForegroundColor Yellow -NoNewline
+    Write-Host "Execução com $($Global:WarnCount) avisos. Ver: $($Global:ErrorLog)"
+}
 
 if (-not $NoBrowser -and (Test-Path $Report)) {
     Write-Info "A abrir relatório no browser..."

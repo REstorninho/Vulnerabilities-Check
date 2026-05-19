@@ -38,10 +38,102 @@ RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
 CYAN='\033[0;36m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; NC='\033[0m'
 
 info()    { echo -e "${GREEN}[+]${NC} $*"; }
-warn()    { echo -e "${YELLOW}[!]${NC} $*"; }
-err()     { echo -e "${RED}[X]${NC} $*"; }
-step()    { echo -e "\n${CYAN}${BOLD}══════ $* ══════${NC}"; }
-section() { echo -e "\n${CYAN}─── $* ───${NC}"; }
+warn()    {
+    echo -e "${YELLOW}[!]${NC} $*"
+    log_jsonl "WARN" "$*"
+    WARN_COUNT=$(( WARN_COUNT + 1 ))
+}
+err()     {
+    echo -e "${RED}[X]${NC} $*"
+    log_jsonl "ERROR" "$*"
+    ERROR_COUNT=$(( ERROR_COUNT + 1 ))
+}
+step()    {
+    CURRENT_PHASE="$*"
+    echo -e "\n${CYAN}${BOLD}══════ $* ══════${NC}"
+    log_jsonl "INFO" "Fase iniciada: $*"
+}
+section() {
+    CURRENT_PHASE="$*"
+    echo -e "\n${CYAN}─── $* ───${NC}"
+}
+
+# ─── Sistema de Logging Estruturado (JSON Lines) ──────────────────
+# Escreve em audit_events.log (tudo) e audit_errors.log (só ERROR/WARN)
+# Formato JSON Line — filtrável com jq:
+#   jq 'select(.level=="ERROR")' audit_events.log
+log_jsonl() {
+    local level="$1" msg="$2" extra="${3:-}"
+    # Só escreve se OUT já existe (mkdir feito mais tarde — durante init pode não estar)
+    [[ -z "${ERROR_LOG:-}" ]] || [[ ! -d "$(dirname "$ERROR_LOG" 2>/dev/null)" ]] && return 0
+    # Sanitizar para JSON
+    local m="${msg//\\/\\\\}"; m="${m//\"/\\\"}"; m="${m//$'\n'/\\n}"; m="${m//$'\t'/\\t}"
+    local p="${CURRENT_PHASE:-init}"; p="${p//\"/\\\"}"
+    local ts; ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local line="{\"timestamp\":\"${ts}\",\"level\":\"${level}\",\"phase\":\"${p}\",\"message\":\"${m}\""
+    [[ -n "$extra" ]] && line="${line},${extra}"
+    line="${line}}"
+    echo "$line" >> "$EVENT_LOG" 2>/dev/null || true
+    if [[ "$level" == "ERROR" ]] || [[ "$level" == "WARN" ]]; then
+        echo "$line" >> "$ERROR_LOG" 2>/dev/null || true
+    fi
+}
+
+# log_error — entrada manual com severidade explícita e dados extra
+# Uso: log_error ERROR "msg" '"key":"value"'
+log_error() {
+    local sev="${1:-ERROR}"; shift
+    local msg="$1"; shift
+    local extra="${1:-}"
+    log_jsonl "$sev" "$msg" "$extra"
+    case "$sev" in
+        ERROR) ERROR_COUNT=$(( ERROR_COUNT + 1 )) ;;
+        WARN)  WARN_COUNT=$(( WARN_COUNT + 1 )) ;;
+    esac
+}
+
+# trap para capturar erros não previstos
+on_error() {
+    local exit_code=$?
+    local line_no=$1
+    local cmd="${BASH_COMMAND:-?}"
+    log_jsonl "ERROR" "Erro não-tratado" "\"line\":${line_no},\"exit_code\":${exit_code},\"command\":\"${cmd//\"/\\\"}\""
+    ERROR_COUNT=$(( ERROR_COUNT + 1 ))
+}
+trap 'on_error $LINENO' ERR
+
+# run_logged — executa comando e regista falha com stderr
+# Uso: run_logged "label" cmd arg1 arg2
+run_logged() {
+    local label="$1"; shift
+    local stderr_file; stderr_file=$(mktemp 2>/dev/null) || stderr_file="/tmp/run_logged_$$"
+    local rc=0
+    "$@" 2>"$stderr_file" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        local err_msg; err_msg=$(head -c 500 "$stderr_file" 2>/dev/null || echo "")
+        log_jsonl "ERROR" "${label} falhou (exit=${rc})" "\"command\":\"${1//\"/\\\"}\",\"stderr\":\"${err_msg//\"/\\\"}\""
+        ERROR_COUNT=$(( ERROR_COUNT + 1 ))
+    fi
+    rm -f "$stderr_file"
+    return $rc
+}
+
+# py_check — verifica último bloco Python e regista erro se houver stderr não-vazio
+# Uso: <python block> 2>/tmp/pyerr.log && py_check "label" "/tmp/pyerr.log"
+py_check() {
+    local label="$1" stderr_file="$2"
+    if [[ -f "$stderr_file" ]] && [[ -s "$stderr_file" ]]; then
+        # Filtrar tracebacks (multi-linha)
+        local err_msg; err_msg=$(head -c 800 "$stderr_file" 2>/dev/null)
+        # Só logar como ERROR se contém "Error" ou "Traceback" ou "Exception"
+        if echo "$err_msg" | grep -qE "Error|Traceback|Exception|SyntaxError"; then
+            log_jsonl "ERROR" "${label} — erro Python" "\"stderr\":\"${err_msg//\"/\\\"}\""
+            ERROR_COUNT=$(( ERROR_COUNT + 1 ))
+            warn "  ${label}: erro Python (ver ${ERROR_LOG})"
+        fi
+    fi
+    rm -f "$stderr_file"
+}
 
 # ─── Defaults ─────────────────────────────────────────────────────
 SKIP_DOWNLOAD=false
@@ -158,8 +250,21 @@ LES2_OUT="${OUT}/les2_raw.txt"
 CVE_CSV="${OUT}/cve_results.csv"
 CVE_SARIF="${OUT}/cve_results.sarif"
 DIFF_FILE="${OUT}/diff_vs_previous.json"
+# Log estruturado (JSON Lines)
+ERROR_LOG="${OUT}/audit_errors.log"
+EVENT_LOG="${OUT}/audit_events.log"
+# Error log
+ERROR_LOG="${OUT}/audit_errors.log"
+ERROR_COUNT=0
+WARN_COUNT=0
+CURRENT_PHASE="init"
 
 mkdir -p "$OUT" "$TOOLS"
+
+# Inicializar logs estruturados — após mkdir
+echo "# audit_events.log — JSON Lines, todos os eventos. Filtrar com: jq 'select(.level==\"ERROR\")' $EVENT_LOG" > "$EVENT_LOG"
+echo "# audit_errors.log — só ERROR e WARN" > "$ERROR_LOG"
+log_jsonl "INFO" "Script iniciado" "\"version\":\"1.0\",\"args\":\"$*\",\"pid\":$$"
 
 # Cache global de Trivy e Grype DBs — persiste entre runs (#4)
 # Poupa ~600MB de download por run
@@ -225,13 +330,19 @@ safe_count() {
 
 safe_download() {
     local url="$1" dest="$2" min_bytes="${3:-10240}"
-    if curl -fsSL --connect-timeout 30 --max-time 120 -o "$dest" "$url" 2>/dev/null; then
+    local curl_err; curl_err=$(mktemp 2>/dev/null) || curl_err="/tmp/curl_err_$$"
+    if curl -fsSL --connect-timeout 30 --max-time 120 -o "$dest" "$url" 2>"$curl_err"; then
         local sz; sz=$(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest" 2>/dev/null || echo 0)
-        if [[ "$sz" -ge "$min_bytes" ]]; then return 0; fi
-        rm -f "$dest"; warn "  Download suspeito ($sz bytes): $dest"
+        if [[ "$sz" -ge "$min_bytes" ]]; then rm -f "$curl_err"; return 0; fi
+        rm -f "$dest"
+        log_error WARN "Download suspeito (${sz} bytes < ${min_bytes} mínimo)" "\"url\":\"${url//\"/\\\"}\",\"size\":${sz}"
+        echo -e "${YELLOW}[!]${NC}   Download suspeito ($sz bytes): $dest"
     else
-        warn "  Falha no download: $url"
+        local em; em=$(head -c 200 "$curl_err" 2>/dev/null)
+        log_error WARN "Falha no download" "\"url\":\"${url//\"/\\\"}\",\"curl_error\":\"${em//\"/\\\"}\""
+        echo -e "${YELLOW}[!]${NC}   Falha no download: $url"
     fi
+    rm -f "$curl_err"
     return 1
 }
 
@@ -1291,30 +1402,37 @@ info "CVEs: ${CVE_TOTAL} total → ${CVE_FILE}"
 step "FASE 4.5 — Exports CSV/SARIF + Compare"
 
 # ── CSV Export ────────────────────────────────────────────────────
-CVE_FILE="$CVE_FILE" CSV_FILE="$CVE_CSV" python3 <<'PYEOF' 2>/dev/null
-import json, csv, os
+PY_ERR_CSV=$(mktemp 2>/dev/null) || PY_ERR_CSV="/tmp/pyerr_csv_$$"
+CVE_FILE="$CVE_FILE" CSV_FILE="$CVE_CSV" python3 <<'PYEOF' 2>"$PY_ERR_CSV"
+import json, csv, os, sys
 try:
     data = json.load(open(os.environ['CVE_FILE']))
 except Exception as e:
-    print(f'[!] CSV: erro a ler CVE file: {e}')
-    exit(0)
-with open(os.environ['CSV_FILE'], 'w', newline='', encoding='utf-8') as f:
-    fields = ['Source','App','Version','FixedIn','CveId','Severity','Cvss','Cwe','Title','Description','References']
-    w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
-    w.writeheader()
-    for row in data: w.writerow(row)
-print(f'[+] CSV: {len(data)} CVEs exportados')
+    print(f'CSV: erro a ler CVE file: {e}', file=sys.stderr)
+    sys.exit(1)
+try:
+    with open(os.environ['CSV_FILE'], 'w', newline='', encoding='utf-8') as f:
+        fields = ['Source','App','Version','FixedIn','CveId','Severity','Cvss','Cwe','Title','Description','References']
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
+        w.writeheader()
+        for row in data: w.writerow(row)
+    print(f'[+] CSV: {len(data)} CVEs exportados')
+except Exception as e:
+    print(f'CSV: erro a escrever: {e}', file=sys.stderr)
+    sys.exit(2)
 PYEOF
+py_check "CSV export" "$PY_ERR_CSV"
 [[ -f "$CVE_CSV" ]] && info "CSV export: $CVE_CSV"
 
 # ── SARIF Export ──────────────────────────────────────────────────
 # SARIF 2.1.0 — formato standard consumido por GitHub, Azure DevOps, GitLab
-CVE_FILE="$CVE_FILE" SARIF_FILE="$CVE_SARIF" TARGET="$TARGET" python3 <<'PYEOF' 2>/dev/null
-import json, os, datetime
+PY_ERR_SARIF=$(mktemp 2>/dev/null) || PY_ERR_SARIF="/tmp/pyerr_sarif_$$"
+CVE_FILE="$CVE_FILE" SARIF_FILE="$CVE_SARIF" TARGET="$TARGET" python3 <<'PYEOF' 2>"$PY_ERR_SARIF"
+import json, os, datetime, sys
 try:
     data = json.load(open(os.environ['CVE_FILE']))
 except Exception as e:
-    print(f'[!] SARIF: erro: {e}'); exit(0)
+    print(f'SARIF: erro: {e}', file=sys.stderr); sys.exit(1)
 
 sev_map = {'CRITICAL': 'error', 'HIGH': 'error', 'IMPORTANT': 'error',
            'MEDIUM': 'warning', 'MODERATE': 'warning',
@@ -1380,22 +1498,27 @@ sarif = {
         "results": results
     }]
 }
-with open(os.environ['SARIF_FILE'], 'w', encoding='utf-8') as f:
-    json.dump(sarif, f, indent=2)
-print(f'[+] SARIF: {len(results)} results, {len(rules_dict)} rules')
+try:
+    with open(os.environ['SARIF_FILE'], 'w', encoding='utf-8') as f:
+        json.dump(sarif, f, indent=2)
+    print(f'[+] SARIF: {len(results)} results, {len(rules_dict)} rules')
+except Exception as e:
+    print(f'SARIF: erro a escrever: {e}', file=sys.stderr); sys.exit(2)
 PYEOF
+py_check "SARIF export" "$PY_ERR_SARIF"
 [[ -f "$CVE_SARIF" ]] && info "SARIF export: $CVE_SARIF"
 
 # ── Compare com run anterior (#3) ─────────────────────────────────
 if [[ -n "$COMPARE_FILE" ]]; then
     info "A comparar com: $COMPARE_FILE"
-    CVE_FILE="$CVE_FILE" PREV_FILE="$COMPARE_FILE" DIFF_FILE="$DIFF_FILE" python3 <<'PYEOF' 2>/dev/null
-import json, os
+    PY_ERR_DIFF=$(mktemp 2>/dev/null) || PY_ERR_DIFF="/tmp/pyerr_diff_$$"
+    CVE_FILE="$CVE_FILE" PREV_FILE="$COMPARE_FILE" DIFF_FILE="$DIFF_FILE" python3 <<'PYEOF' 2>"$PY_ERR_DIFF"
+import json, os, sys
 try:
     current = json.load(open(os.environ['CVE_FILE']))
     previous = json.load(open(os.environ['PREV_FILE']))
 except Exception as e:
-    print(f'[!] Compare: erro: {e}'); exit(0)
+    print(f'Compare: erro a ler ficheiros: {e}', file=sys.stderr); sys.exit(1)
 
 # Indexar por (CVE, App) para comparar
 def index_by_key(data):
@@ -1435,11 +1558,14 @@ diff = {
     "resolved_cves": resolved_cves,
     "severity_changes": sev_changes
 }
-with open(os.environ['DIFF_FILE'], 'w', encoding='utf-8') as f:
-    json.dump(diff, f, indent=2)
-
-print(f'[+] Compare: {len(new_cves)} novos, {len(resolved_cves)} resolvidos, {len(sev_changes)} mudaram severidade')
+try:
+    with open(os.environ['DIFF_FILE'], 'w', encoding='utf-8') as f:
+        json.dump(diff, f, indent=2)
+    print(f'[+] Compare: {len(new_cves)} novos, {len(resolved_cves)} resolvidos, {len(sev_changes)} mudaram severidade')
+except Exception as e:
+    print(f'Compare: erro a escrever diff: {e}', file=sys.stderr); sys.exit(2)
 PYEOF
+    py_check "Compare diff" "$PY_ERR_DIFF"
     [[ -f "$DIFF_FILE" ]] && info "Diff: $DIFF_FILE"
 fi
 
@@ -1876,6 +2002,37 @@ if [[ -n "$TOP_FINDINGS" ]]; then
     echo '</div>'
 fi
 
+# Execution errors / warnings block — só aparece se houver
+if [[ "$ERROR_COUNT" -gt 0 ]] 2>/dev/null || [[ "$WARN_COUNT" -gt 0 ]] 2>/dev/null; then
+    err_color=$([ "$ERROR_COUNT" -gt 0 ] && echo "var(--red)" || echo "var(--yellow)")
+    err_bg=$([ "$ERROR_COUNT" -gt 0 ] && echo "rgba(248,81,73,.05)" || echo "rgba(210,153,34,.05)")
+    echo "<div style=\"background:${err_bg};border:1px solid ${err_color};border-left:4px solid ${err_color};border-radius:6px;padding:14px 18px;margin-bottom:14px\">"
+    echo "<h2 style=\"color:${err_color};font-size:.95em;margin-bottom:10px\">&#9888; Execution Issues — ${ERROR_COUNT} errors, ${WARN_COUNT} warnings</h2>"
+    echo "<div style=\"font-size:.82em;color:var(--dim);margin-bottom:8px\">Log estruturado: <code style=\"color:var(--cyan)\">${ERROR_LOG}</code></div>"
+    if [[ -f "$ERROR_LOG" ]]; then
+        echo "<details><summary style=\"cursor:pointer;color:var(--cyan);font-size:.85em\">Ver últimos 15 eventos</summary>"
+        echo "<table class=\"vtable\" style=\"margin-top:8px\"><thead><tr><th>Hora</th><th>Nível</th><th>Fase</th><th>Mensagem</th></tr></thead><tbody>"
+        # Parsear JSON Lines do error log — últimos 15
+        tail -15 "$ERROR_LOG" 2>/dev/null | grep -v "^#" | python3 -c "
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line or line.startswith('#'): continue
+    try:
+        e = json.loads(line)
+        ts = e.get('timestamp','').replace('T',' ').replace('Z','')
+        lvl = e.get('level','')
+        phase = e.get('message','').replace('<','&lt;').replace('>','&gt;')[:80]
+        ph = e.get('phase','').replace('<','&lt;').replace('>','&gt;')[:30]
+        lvl_color = '#f85149' if lvl == 'ERROR' else '#d29922'
+        print(f'<tr><td style=\"font-size:.75em;color:var(--dim)\">{ts}</td><td><span style=\"color:{lvl_color};font-weight:bold\">{lvl}</span></td><td style=\"color:var(--cyan);font-size:.78em\">{ph}</td><td style=\"font-size:.8em\">{phase}</td></tr>')
+    except: pass
+" 2>/dev/null
+        echo "</tbody></table></details>"
+    fi
+    echo "</div>"
+fi
+
 # CVE Summary Table
 if [[ -n "$CVE_TABLE_DATA" ]]; then
     echo "<div class=\"category\"><div class=\"category-h\">&#128027; CVE Summary (${UNIQ_CVES} únicos nos scans de texto)</div>"
@@ -2147,11 +2304,16 @@ cat <<EOF
 ║  [Dash]   App upd   : ${APP_UPD_COUNT}
 ║  Inventário         : ${INV_COUNT} items
 ╠══════════════════════════════════════════════════╣
+║  Execução  errors   : ${ERROR_COUNT}
+║  Execução  warnings : ${WARN_COUNT}
+╠══════════════════════════════════════════════════╣
 ║  Relatório HTML : ${REPORT}
 ║  Inventory JSON : ${INV_FILE}
 ║  CVEs JSON      : ${CVE_FILE}
 ║  CVEs CSV       : ${CVE_CSV}
 ║  CVEs SARIF     : ${CVE_SARIF}
+║  Event log      : ${EVENT_LOG}
+║  Error log      : ${ERROR_LOG}
 EOF
 if [[ -f "$DIFF_FILE" ]]; then
     NEW_C=$(python3 -c "import json; print(json.load(open('$DIFF_FILE'))['summary']['new'])" 2>/dev/null || echo "?")
@@ -2161,6 +2323,20 @@ if [[ -f "$DIFF_FILE" ]]; then
 fi
 echo "╚══════════════════════════════════════════════════╝"
 printf '\033[0m\n'
+
+# Log final do script
+log_jsonl "INFO" "Script terminado" "\"errors\":${ERROR_COUNT},\"warnings\":${WARN_COUNT},\"cves_total\":${CVE_TOTAL:-0}"
+
+# Mensagem destacada se houve erros
+if [[ "$ERROR_COUNT" -gt 0 ]] 2>/dev/null; then
+    printf '\033[0;31m\033[1m[!]\033[0m '
+    echo "Ocorreram ${ERROR_COUNT} erros e ${WARN_COUNT} avisos durante a execução."
+    echo "    Ver: ${ERROR_LOG}"
+    echo "    Filtrar: jq 'select(.level==\"ERROR\")' ${EVENT_LOG}"
+elif [[ "$WARN_COUNT" -gt 0 ]] 2>/dev/null; then
+    printf '\033[1;33m\033[1m[!]\033[0m '
+    echo "Execução com ${WARN_COUNT} avisos. Ver: ${ERROR_LOG}"
+fi
 
 if [[ "$NO_BROWSER" == "false" ]] && [[ -f "$REPORT" ]]; then
     if command -v xdg-open &>/dev/null; then
