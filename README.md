@@ -116,6 +116,43 @@ A DB de vulnerabilidades do Trivy tem ~500MB e o Grype tem ~150MB. Por defeito s
     path: reports/
 ```
 
+### Logging estruturado de execução
+
+Cada run produz dois ficheiros de log em formato **JSON Lines** (uma linha por evento), úteis para debugging e auditoria:
+
+| Ficheiro | Conteúdo |
+|----------|----------|
+| `audit_events.log` | Todos os eventos (INFO, WARN, ERROR) |
+| `audit_errors.log` | Apenas ERROR e WARN — para debug rápido |
+
+Cada linha é um objecto JSON com `timestamp`, `level`, `phase`, `message` e campos extra contextuais (ex: comando que falhou, URL inacessível, stderr capturado, número de linha do script).
+
+**Filtrar com `jq` (Linux):**
+```bash
+# Só erros
+jq 'select(.level=="ERROR")' reports/*/audit_events.log
+
+# Erros agrupados por fase
+jq -s 'group_by(.phase) | map({phase: .[0].phase, count: length})' reports/*/audit_errors.log
+
+# Linha do tempo de execução
+jq -c '{ts: .timestamp, lvl: .level, msg: .message}' reports/*/audit_events.log
+```
+
+**Filtrar com PowerShell (Windows):**
+```powershell
+# Só erros
+Get-Content reports\*\audit_events.log | ConvertFrom-Json | Where-Object level -eq 'ERROR'
+
+# Erros agrupados por fase
+Get-Content reports\*\audit_errors.log | ConvertFrom-Json |
+  Group-Object phase | Select-Object Name,Count
+```
+
+**No relatório HTML** — se houver erros ou avisos durante a execução, um bloco destacado aparece logo após o Executive Summary com contagens e os últimos 15 eventos do log. Caso contrário, não é mostrado.
+
+O sumário final no terminal mostra sempre o número de errors/warnings e o caminho do log, mesmo que a execução tenha terminado com sucesso.
+
 ---
 
 ## Relatório HTML
@@ -434,6 +471,8 @@ Todos os dados estruturados ficam disponíveis em múltiplos formatos para integ
 | `cve_results.sarif` | SARIF 2.1.0 | CVEs em formato padrão | GitHub Code Scanning, Azure DevOps, GitLab |
 | `app_updates.json` | JSON | Updates disponíveis + comandos | Patch management |
 | `diff_vs_previous.json` | JSON | Comparação com run anterior | Tracking de postura ao longo do tempo |
+| `audit_events.log` | JSON Lines | Todos os eventos de execução | Debug e auditoria |
+| `audit_errors.log` | JSON Lines | Só ERROR e WARN | Debug rápido |
 | `REPORT_<host>_<date>.html` | HTML | Relatório interactivo | Visualização humana |
 
 Campos do `cve_results.json`: `Source` (Trivy/Grype/NVD), `App`, `Version`, `FixedIn`, `CveId`, `Severity`, `Cvss`, `Cwe`, `Title`, `Description`, `References`.
