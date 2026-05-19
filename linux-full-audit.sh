@@ -369,10 +369,12 @@ safe_download() {
 # github_release_download — descarrega asset ZIP de release do GitHub
 # Tenta múltiplos métodos porque objects.githubusercontent.com pode estar bloqueado
 # Uso: github_release_download "owner/repo" "*linux*amd64*.zip" "/dest/file.zip" min_bytes fallback_ver fallback_url
-# Retorna: versão descarregada no stdout, exit 0 = sucesso, exit 1 = falha
+# github_release_download — descarrega asset ZIP de release do GitHub
+# Se objects.githubusercontent.com estiver bloqueado, mostra instruções manuais
+# Uso: github_release_download repo filter dest min_bytes fallback_ver fallback_url [manual_dest]
 github_release_download() {
     local repo="$1" asset_filter="$2" dest="$3" min_bytes="${4:-10240}"
-    local fallback_ver="${5:-}" fallback_url="${6:-}"
+    local fallback_ver="${5:-}" fallback_url="${6:-}" manual_dest="${7:-$3}"
     local ver="$fallback_ver" asset_url="$fallback_url"
 
     # 1. Obter metadados via API
@@ -380,15 +382,13 @@ github_release_download() {
     api_resp=$(curl -fsSL --max-time 15 "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null) || api_resp=""
     if [[ -n "$api_resp" ]]; then
         ver=$(echo "$api_resp" | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))" 2>/dev/null || echo "$fallback_ver")
-        # Procurar asset que corresponde ao filtro
         local found_url
         found_url=$(echo "$api_resp" | python3 -c "
 import sys,json,fnmatch
 try:
     data=json.load(sys.stdin)
-    pat='${asset_filter}'
     for a in data.get('assets',[]):
-        if fnmatch.fnmatch(a['name'], pat):
+        if fnmatch.fnmatch(a['name'], '${asset_filter}'):
             print(a['browser_download_url']); break
 except: pass
 " 2>/dev/null || echo "")
@@ -399,23 +399,39 @@ except: pass
     fi
     [[ -z "$asset_url" ]] && { warn "  Sem URL de download disponível"; return 1; }
 
-    # 2. Tentar safe_download (curl múltiplas tentativas + wget)
+    # 2. Teste rápido de conectividade ao host (5s) — evitar múltiplas tentativas inúteis
+    local download_host
+    download_host=$(python3 -c "from urllib.parse import urlparse; print(urlparse('${asset_url}').netloc)" 2>/dev/null                     || echo "objects.githubusercontent.com")
+    if ! curl -fsSL --max-time 5 --head "https://${download_host}" -o /dev/null 2>/dev/null; then
+        local tool_name; tool_name=$(basename "$repo")
+        warn "  ${download_host} inacessível (firewall/proxy)"
+        echo ""
+        echo -e "${YELLOW}  ┌─ INSTALAÇÃO MANUAL ──────────────────────────────────────────┐${NC}"
+        echo -e "${YELLOW}  │ 1. Descarregar numa máquina com acesso à internet:            │${NC}"
+        echo -e "${CYAN}  │    ${asset_url}${NC}"
+        echo -e "${YELLOW}  │ 2. Extrair o binário do ZIP                                   │${NC}"
+        echo -e "${CYAN}  │ 3. Copiar para: ${manual_dest}${NC}"
+        echo -e "${YELLOW}  │ 4. Re-executar o script (usará cache automaticamente)         │${NC}"
+        echo -e "${YELLOW}  └───────────────────────────────────────────────────────────────┘${NC}"
+        echo ""
+        log_jsonl "WARN" "${tool_name}: host bloqueado (${download_host})"             "\"download_url\":\"${asset_url}\",\"manual_dest\":\"${manual_dest}\""
+        return 1
+    fi
+
+    # 3. Host acessível — tentar descarregar
     if safe_download "$asset_url" "$dest" "$min_bytes"; then echo "$ver"; return 0; fi
 
-    # 3. curl com header Accept: application/octet-stream (pode ser tratado diferente por proxies)
+    # 4. curl com Accept: application/octet-stream
     info "  A tentar com Accept: application/octet-stream..."
-    if curl -fsSL --max-time 120 -H "Accept: application/octet-stream" \
-            -o "$dest" "$asset_url" 2>/dev/null; then
+    if curl -fsSL --max-time 120 -H "Accept: application/octet-stream"             -o "$dest" "$asset_url" 2>/dev/null; then
         local sz; sz=$(stat -c%s "$dest" 2>/dev/null || echo 0)
         if [[ "$sz" -ge "$min_bytes" ]]; then echo "$ver"; return 0; fi
         rm -f "$dest"
     fi
 
-    warn "  Todos os métodos falharam."
-    warn "  Para instalar manualmente: $asset_url"
+    warn "  Todos os métodos falharam. Download manual: $asset_url"
     return 1
 }
-
 ensure_tool() {
     local name="$1" dest="$2" url="$3" min_bytes="${4:-10240}"
     if [[ -f "$dest" ]] && [[ "$FORCE" == "false" ]]; then
@@ -691,7 +707,7 @@ elif [[ "$SKIP_DOWNLOAD" == "false" ]] || [[ "$FORCE" == "true" ]]; then
 
     OSV_VER=$(github_release_download \
         "google/osv-scanner" "$OSV_FILTER" "$OSV_ZIP" 5000000 \
-        "2.3.8" "$OSV_FALLBACK_URL") && {
+        "2.3.8" "$OSV_FALLBACK_URL" "$OSV_BIN") && {
         mkdir -p "$OSV_TMP"
         if unzip -q "$OSV_ZIP" -d "$OSV_TMP" 2>/dev/null; then
             EXE_FOUND=$(find "$OSV_TMP" -type f \( -name "osv-scanner" -o -name "osv-scanner_*" \) \

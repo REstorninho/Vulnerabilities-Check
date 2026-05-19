@@ -322,24 +322,25 @@ function Ensure-Tool {
     Write-Warn "  $Name — download falhou"; return $false
 }
 # Get-GitHubRelease — descarrega asset ZIP de release do GitHub
-# Tenta múltiplos métodos porque github.com/releases/download (objects.githubusercontent.com)
-# pode estar bloqueado por firewalls mesmo quando api.github.com funciona.
+# Se objects.githubusercontent.com estiver bloqueado (firewall corporativo),
+# mostra instruções de instalação manual em vez de tentar métodos que vão falhar.
 function Get-GitHubRelease {
     param(
-        [string]$Repo,          # ex: "google/osv-scanner"
-        [string]$AssetFilter,   # ex: "*windows*amd64*.zip"
-        [string]$Dest,          # path destino do ZIP
+        [string]$Repo,
+        [string]$AssetFilter,
+        [string]$Dest,
         [int]$MinBytes    = 10240,
-        [string]$FallbackVer = "",   # versão a usar se API falhar
-        [string]$FallbackUrl = ""    # URL completa se API não tiver o asset
+        [string]$FallbackVer = "",
+        [string]$FallbackUrl = "",
+        [string]$ManualDest = ""   # path onde copiar manualmente (para a mensagem de ajuda)
     )
 
-    # 1. Obter metadados da release via API
+    # 1. Obter metadados via API
     $ver = $FallbackVer; $assetUrl = $FallbackUrl
     try {
-        $rel    = Invoke-RestMethod "https://api.github.com/repos/${Repo}/releases/latest" -TimeoutSec 15 -ErrorAction Stop
-        $ver    = $rel.tag_name.TrimStart("v")
-        $asset  = $rel.assets | Where-Object { $_.name -like $AssetFilter } | Select-Object -First 1
+        $rel   = Invoke-RestMethod "https://api.github.com/repos/${Repo}/releases/latest" -TimeoutSec 15 -ErrorAction Stop
+        $ver   = $rel.tag_name.TrimStart("v")
+        $asset = $rel.assets | Where-Object { $_.name -like $AssetFilter } | Select-Object -First 1
         if ($asset) { $assetUrl = $asset.browser_download_url }
         Write-Info "  v${ver} — $(Split-Path $assetUrl -Leaf)"
     } catch {
@@ -347,10 +348,42 @@ function Get-GitHubRelease {
     }
     if (-not $assetUrl) { Write-Warn "  Sem URL de download disponível"; return $null }
 
-    # 2. Tentar Safe-Download (IWR + WebClient + BITS)
+    # 2. Teste rápido de conectividade ao host de download (objects.githubusercontent.com)
+    # Se falhar imediatamente, não perder tempo com múltiplos métodos
+    $downloadHost = ([Uri]$assetUrl).Host
+    $quickTest = $false
+    try {
+        $req = [System.Net.WebRequest]::Create("https://${downloadHost}")
+        $req.Timeout = 5000; $req.Method = "HEAD"
+        $resp = $req.GetResponse(); $resp.Close(); $quickTest = $true
+    } catch {}
+
+    if (-not $quickTest) {
+        # Host bloqueado — mostrar instrução clara e sair rapidamente
+        $toolName = Split-Path $Repo -Leaf
+        $manualPath = if ($ManualDest) { $ManualDest } else { $Dest }
+        Write-Warn "  $downloadHost inacessível (firewall/proxy)"
+        Write-Host ""
+        Write-Host "  ┌─ INSTALAÇÃO MANUAL ─────────────────────────────────────┐" -ForegroundColor Yellow
+        Write-Host "  │ 1. Descarregar numa máquina com acesso à internet:       │" -ForegroundColor Yellow
+        Write-Host "  │    $assetUrl" -ForegroundColor Cyan
+        Write-Host "  │ 2. Extrair o .exe do ZIP                                 │" -ForegroundColor Yellow
+        Write-Host "  │ 3. Copiar para: $manualPath" -ForegroundColor Cyan
+        Write-Host "  │ 4. Re-executar o script (usará cache automaticamente)    │" -ForegroundColor Yellow
+        Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor Yellow
+        Write-Host ""
+        Write-LogJsonl -Level "WARN" -Message "$toolName: host de download bloqueado ($downloadHost)" -Extra @{
+            download_url = $assetUrl
+            manual_dest  = $manualPath
+        }
+        return $null
+    }
+
+    # Host acessível — tentar descarregar
+    # Método 1: Safe-Download (IWR + WebClient + BITS)
     if (Safe-Download -Url $assetUrl -Dest $Dest -MinBytes $MinBytes) { return $ver }
 
-    # 3. Invoke-RestMethod -OutFile (header Accept diferente — pode ser tratado diferente pelo proxy)
+    # Método 2: Invoke-RestMethod com Accept: application/octet-stream
     Write-Info "  A tentar Invoke-RestMethod com Accept: application/octet-stream..."
     try {
         Invoke-RestMethod -Uri $assetUrl -OutFile $Dest -TimeoutSec 120 `
@@ -359,7 +392,7 @@ function Get-GitHubRelease {
         Remove-Item $Dest -Force -ErrorAction SilentlyContinue
     } catch {}
 
-    # 4. curl.exe nativo do Windows 10 1803+ (usa WinHTTP em vez de WinINet — stack diferente)
+    # Método 3: curl.exe nativo (WinHTTP — stack diferente do PS)
     $curlExe = "$env:SystemRoot\System32\curl.exe"
     if (Test-Path $curlExe) {
         Write-Info "  A tentar curl.exe nativo (WinHTTP)..."
@@ -371,7 +404,7 @@ function Get-GitHubRelease {
     }
 
     Write-Warn "  Todos os métodos falharam."
-    Write-Warn "  Para instalar manualmente: $assetUrl"
+    Write-Warn "  Download manual: $assetUrl"
     return $null
 }
 
@@ -617,7 +650,8 @@ if (Test-Path $OsvBin) {
             -Dest        $osvZip `
             -MinBytes    5000000 `
             -FallbackVer "2.3.8" `
-            -FallbackUrl "https://github.com/google/osv-scanner/releases/download/v2.3.8/osv-scanner_2.3.8_windows_amd64.zip"
+            -FallbackUrl "https://github.com/google/osv-scanner/releases/download/v2.3.8/osv-scanner_2.3.8_windows_amd64.zip" `
+            -ManualDest  $OsvBin
 
         if ($osvVer -and (Test-Path $osvZip)) {
             New-Item -ItemType Directory -Force -Path $osvTmp | Out-Null
@@ -664,7 +698,8 @@ if (Test-Path $WatsonBin) {
             -Dest        $watsonZip `
             -MinBytes    20000 `
             -FallbackVer "2.1.0" `
-            -FallbackUrl "https://github.com/jazzband/Watson/releases/download/v2.1.0/Watson.zip"
+            -FallbackUrl "https://github.com/jazzband/Watson/releases/download/v2.1.0/Watson.zip" `
+            -ManualDest  $WatsonBin
 
         if ($watsonVer -and (Test-Path $watsonZip)) {
             New-Item -ItemType Directory -Force -Path $watsonTmp | Out-Null
