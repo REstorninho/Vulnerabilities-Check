@@ -1035,7 +1035,11 @@ echo "  Latest ${KERNEL_SERIES}: ${LATEST_KERNEL}"
 # ── Camada C: CVEs inline ────────────────────────────────────────
 echo ""; echo "══ CAMADA C — CVEs de kernel conhecidos (offline) ══"; echo ""
 KV=$(echo "$KERNEL_FULL" | grep -oE "^[0-9]+\.[0-9]+\.[0-9]+")
-[[ -z "$KV" ]] && KV=$(echo "$KERNEL_FULL" | grep -oE "^[0-9]+\.[0-9]+" | awk '{print $1".0"}')
+if [[ -z "$KV" ]]; then
+    _kv2=$(echo "$KERNEL_FULL" | grep -oE "^[0-9]+\.[0-9]+")
+    if [[ -n "$_kv2" ]]; then KV="${_kv2}.0"; else KV="0.0.0"; fi
+    unset _kv2
+fi
 FOUND_CVES=0
 
 kernel_lt() {
@@ -1049,6 +1053,13 @@ kernel_le() {
     v1=$(echo "$1" | awk -F'[.-]' '{printf "%05d%05d%05d",$1,$2,$3}')
     v2=$(echo "$2" | awk -F'[.-]' '{printf "%05d%05d%05d",$1,$2,$3}')
     [ "$v1" -le "$v2" ]
+}
+# Comparação de versão genérica (para ferramentas como pkexec, runc)
+ver_lt() {
+    local v1 v2
+    v1=$(echo "$1" | awk -F'[^0-9]+' '{printf "%05d%05d%05d",$1+0,$2+0,$3+0}')
+    v2=$(echo "$2" | awk -F'[^0-9]+' '{printf "%05d%05d%05d",$1+0,$2+0,$3+0}')
+    [ "$v1" -lt "$v2" ]
 }
 
 check_cve() {
@@ -1080,14 +1091,14 @@ check_cve "CVE-2016-5195"  "CRÍTICO" "Dirty COW"                               
 # Checks específicos de distro
 command -v pkexec &>/dev/null && {
     PKEXEC_VER=$(pkexec --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
-    [[ -n "$PKEXEC_VER" ]] && kernel_lt "$PKEXEC_VER" "0.120" && \
+    [[ -n "$PKEXEC_VER" ]] && ver_lt "$PKEXEC_VER" "0.120.0" && \
         echo "  CRÍTICO: CVE-2021-4034 (PwnKit) — pkexec ${PKEXEC_VER} < 0.120 — CWE-269"
 }
 echo "${DISTRO_ID}" | grep -qi "ubuntu" && kernel_lt "$KV" "6.2.0" && \
     echo "  CRÍTICO: CVE-2023-2640 + CVE-2023-32629 (overlayfs Ubuntu)"
 command -v runc &>/dev/null && {
     RUNC_VER=$(runc --version 2>/dev/null | grep "runc version" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
-    [[ -n "$RUNC_VER" ]] && kernel_lt "$RUNC_VER" "1.1.12" && \
+    [[ -n "$RUNC_VER" ]] && ver_lt "$RUNC_VER" "1.1.12" && \
         echo "  CRÍTICO: CVE-2024-21626 (Leaky Vessels) — runc ${RUNC_VER} < 1.1.12"
 }
 

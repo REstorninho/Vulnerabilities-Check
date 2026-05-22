@@ -339,7 +339,7 @@ function Get-GitHubRelease {
     $ver = $FallbackVer; $assetUrl = $FallbackUrl
     try {
         $rel   = Invoke-RestMethod "https://api.github.com/repos/${Repo}/releases/latest" -TimeoutSec 15 -ErrorAction Stop
-        $ver   = $rel.tag_name.TrimStart("v")
+        $ver   = if ($rel -and $rel.tag_name) { $rel.tag_name.TrimStart("v") } else { $FallbackVer }
         $asset = $rel.assets | Where-Object { $_.name -like $AssetFilter } | Select-Object -First 1
         if ($asset) { $assetUrl = $asset.browser_download_url }
         Write-Info "  v${ver} — $(Split-Path $assetUrl -Leaf)"
@@ -532,20 +532,22 @@ function Get-Category {
 }
 
 # ─── AV Exclusion ─────────────────────────────────────────────────
-$AvExclusionAdded = $false
+$Global:AvExclusionAdded = $false
+$Global:AvExclusionPath  = $null
 if ($AvExclusion -and $IsAdmin) {
     Write-Sec "AV Exclusion"
     try {
         $def = Get-MpPreference -ErrorAction Stop
         if ($def.ExclusionPath -notcontains $Tools) {
             Add-MpPreference -ExclusionPath $Tools -ErrorAction Stop
-            $AvExclusionAdded = $true
+            $Global:AvExclusionAdded = $true
+            $Global:AvExclusionPath  = $Tools
             Write-Info "AV exclusion adicionada: $Tools"
         } else { Write-Info "AV exclusion já existente" }
     } catch { Write-Warn "AV exclusion falhou: $($_.Exception.Message)" }
     $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
-        if ($script:AvExclusionAdded) {
-            Remove-MpPreference -ExclusionPath $script:Tools -ErrorAction SilentlyContinue
+        if ($Global:AvExclusionAdded -and $Global:AvExclusionPath) {
+            Remove-MpPreference -ExclusionPath $Global:AvExclusionPath -ErrorAction SilentlyContinue
         }
     }
 }
@@ -595,7 +597,7 @@ if (-not (Test-Path $TrivyBin) -or $Force) {
     Write-Info "A determinar versão do Trivy..."
     try {
         $rel = Invoke-RestMethod "https://api.github.com/repos/aquasecurity/trivy/releases/latest" -TimeoutSec 15
-        $ver = $rel.tag_name.TrimStart("v")
+        $ver = if ($rel -and $rel.tag_name) { $rel.tag_name.TrimStart("v") } else { $null }
         $url = "https://github.com/aquasecurity/trivy/releases/download/v${ver}/trivy_${ver}_windows-64bit.zip"
         $zip = "$Tools\trivy.zip"
         if (Safe-Download -Url $url -Dest $zip -MinBytes 5000000) {
@@ -615,7 +617,7 @@ if (-not (Test-Path $GrypeBin) -or $Force) {
     Write-Info "A determinar versão do Grype..."
     try {
         $rel = Invoke-RestMethod "https://api.github.com/repos/anchore/grype/releases/latest" -TimeoutSec 15
-        $ver = $rel.tag_name.TrimStart("v")
+        $ver = if ($rel -and $rel.tag_name) { $rel.tag_name.TrimStart("v") } else { $null }
         $url = "https://github.com/anchore/grype/releases/download/v${ver}/grype_${ver}_windows_amd64.zip"
         $zip = "$Tools\grype.zip"
         if (Safe-Download -Url $url -Dest $zip -MinBytes 20000000) {
@@ -646,7 +648,7 @@ if (Test-Path $OsvBin) {
         $osvVer = "2.3.8"  # fallback
         try {
             $rel = Invoke-RestMethod "https://api.github.com/repos/google/osv-scanner/releases/latest" -TimeoutSec 15 -ErrorAction Stop
-            $osvVer = $rel.tag_name.TrimStart("v")
+            $osvVer = if ($rel -and $rel.tag_name) { $rel.tag_name.TrimStart("v") } else { $osvVer }
         } catch { Write-Warn "  OSV-Scanner: GitHub API inacessível — a usar v${osvVer}" }
 
         $osvUrl = "https://github.com/google/osv-scanner/releases/download/v${osvVer}/osv-scanner_windows_amd64.exe"
@@ -796,7 +798,9 @@ if ($Quick) {
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
         $proc = [System.Diagnostics.Process]::Start($psi)
         $stdout = $proc.StandardOutput.ReadToEnd(); $stderr = $proc.StandardError.ReadToEnd()
-        $proc.WaitForExit(300000)
+        $timedOut = -not $proc.WaitForExit(300000)
+        if ($timedOut) { try { $proc.Kill() } catch {}; Write-Warn "04_winpeas TIMEOUT (5 min)" }
+        elseif ($proc.ExitCode -ne 0) { Write-Warn "04_winpeas exit $($proc.ExitCode) — possível bloqueio por AV" }
         ($stdout + "`n" + $stderr) | Out-File "$Out\04_winpeas.txt" -Encoding UTF8
         $sz = [math]::Round((Get-Item "$Out\04_winpeas.txt").Length / 1KB, 1)
         Write-Info "04_winpeas OK ($sz KB)"
@@ -835,7 +839,9 @@ if ($Quick) {
         $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
         $proc = [System.Diagnostics.Process]::Start($psi)
         $stdout = $proc.StandardOutput.ReadToEnd(); $stderr = $proc.StandardError.ReadToEnd()
-        $proc.WaitForExit(120000)
+        $timedOut = -not $proc.WaitForExit(120000)
+        if ($timedOut) { try { $proc.Kill() } catch {}; Write-Warn "05_seatbelt TIMEOUT (2 min)" }
+        elseif ($proc.ExitCode -ne 0) { Write-Warn "05_seatbelt exit $($proc.ExitCode)" }
         ($stdout + "`n" + $stderr) | Out-File "$Out\05_seatbelt.txt" -Encoding UTF8
         $sz = [math]::Round((Get-Item "$Out\05_seatbelt.txt").Length / 1KB, 1)
         Write-Info "05_seatbelt OK ($sz KB)"
@@ -946,6 +952,7 @@ if ($NoNvd) {
         $ver = $components[$pkg]; $nvdOut.Add("─── $pkg $ver ───")
         try {
             $resp = Invoke-NvdApi -Keyword $pkg -ResultsPerPage 5 -Retries 1
+            if (-not $resp -or -not $resp.vulnerabilities) { $nvdOut.Add("  Sem resultados NVD"); continue }
             foreach ($v in $resp.vulnerabilities | Select-Object -First 5) {
                 $cveId = $v.cve.id; $sev = "N/A"
                 foreach ($mk in @("cvssMetricV31","cvssMetricV30","cvssMetricV2")) { $ms = $v.cve.metrics.$mk; if ($ms) { $sev = $ms[0].cvssData.baseSeverity; break } }
@@ -1427,6 +1434,7 @@ if (-not $NoNvd) {
         }
         try {
             $resp = Invoke-NvdApi -Keyword $app.NvdKeyword -ResultsPerPage 10 -Retries 1
+            if (-not $resp -or -not $resp.vulnerabilities) { continue }
             foreach ($v in $resp.vulnerabilities) {
                 $pair = "$($v.cve.id)|$($app.Key)"; if (-not $SeenPairs.Add($pair)) { continue }
                 $sev = "UNKNOWN"; $score = $null; $cwe = ""
@@ -1736,6 +1744,10 @@ foreach ($f in $txtFiles) { $cat = Get-Category -base $f.BaseName; $catFiles[$ca
 $CveJson  = $CveResults | Select-Object Source,App,Version,FixedIn,CveId,Severity,Cvss,Title,Description,Cwe,References | ConvertTo-Json -Depth 5 -Compress
 $InvJson  = $Inventory  | Select-Object Key,Name,Version,Publisher,Category | ConvertTo-Json -Depth 3 -Compress
 $UpdJson  = $AppUpdates | Select-Object Source,Name,WingetId,Current,Available,UpdateCmd | ConvertTo-Json -Depth 3 -Compress
+# Escapar </script> para evitar quebra de parsing HTML quando CVE data contém essa string
+$CveJson = $CveJson -replace '</script>', '<\/script>'
+$InvJson = $InvJson -replace '</script>', '<\/script>'
+$UpdJson = $UpdJson -replace '</script>', '<\/script>'
 
 # ── OS Info ───────────────────────────────────────────────────────
 $winBuild = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue
