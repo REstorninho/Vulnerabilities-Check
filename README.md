@@ -64,6 +64,23 @@ powershell -File windows-full-audit.ps1 -Compare "reports\host_20260515_1030\cve
 
 Transforma os scripts de "snapshot único" em "tracking de postura de segurança ao longo do tempo".
 
+### Deep Scan — secrets e misconfigurations
+
+Por defeito o Trivy corre apenas no modo `vuln` (CVEs). Com `--deep-scan`/`-DeepScan`, activa também os scanners `secret` e `misconfig`:
+
+- **secret** — detecta tokens, API keys, passwords hardcoded em ficheiros
+- **misconfig** — detecta configurações inseguras (Dockerfile, Kubernetes, Terraform, etc.)
+
+```bash
+# Linux
+sudo bash linux-full-audit.sh --deep-scan
+
+# Windows
+powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -DeepScan
+```
+
+> ⚠️ O deep scan é significativamente mais lento e pode gerar falsos positivos em ambientes com muitos ficheiros de configuração.
+
 ### Exit codes semânticos (CI/CD)
 
 Por defeito os scripts saem com `0`. Com `--fail-on`/`-FailOn`, podem falhar o pipeline quando há findings ao nível especificado:
@@ -192,6 +209,9 @@ powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -AvExclusion
 # Modo rápido (salta winPEAS e Seatbelt)
 powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -Quick
 
+# Deep scan (Trivy com secrets + misconfig)
+powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -DeepScan
+
 # Sem consulta NVD (offline)
 powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -NoNvd
 
@@ -210,10 +230,14 @@ powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -Output C:\audit
 | `-Output DIR` | `-o` | Directório de output personalizado |
 | `-SkipDownload` | `-s` | Usa ferramentas em cache, não descarrega |
 | `-Quick` | `-q` | Salta winPEAS e Seatbelt (mais rápido) |
+| `-DeepScan` | | Activa Trivy secret+misconfig (mais lento, encontra secrets) |
 | `-NoNvd` | `-n` | Salta consulta NVD API (modo offline) |
 | `-NoBrowser` | | Não abre o relatório no browser |
 | `-AvExclusion` | | Adiciona `tools\` às exclusões do Defender durante o scan |
 | `-Force` | | Re-download de ferramentas mesmo que já existam em cache |
+| `-NvdApiKey KEY` | | NVD API key (também via env var `NVD_API_KEY`) |
+| `-Compare FILE` | | Comparar com `cve_results.json` de run anterior |
+| `-FailOn LEVEL` | | Exit code != 0 quando há findings (`critical`/`high`/`medium`) |
 
 ### Fases de execução
 
@@ -312,6 +336,9 @@ sudo bash linux-full-audit.sh --no-nvd
 # Offline completo (sem downloads, sem NVD)
 sudo bash linux-full-audit.sh --skip-download --no-nvd
 
+# Deep scan (Trivy com secrets + misconfig)
+sudo bash linux-full-audit.sh --deep-scan
+
 # Forçar re-download de todas as ferramentas
 sudo bash linux-full-audit.sh --force
 
@@ -327,9 +354,13 @@ sudo bash linux-full-audit.sh --output /tmp/audit
 | `--output DIR` | `-o` | Directório de output personalizado |
 | `--skip-download` | `-s` | Usa ferramentas em cache, não descarrega |
 | `--quick` | `-q` | Salta linPEAS e Lynis (mais rápido) |
+| `--deep-scan` | | Activa Trivy secret+misconfig (mais lento, encontra secrets) |
 | `--no-nvd` | `-n` | Salta consulta NVD API (modo offline) |
 | `--no-browser` | | Não tenta abrir o relatório no browser |
 | `--force` | | Re-download de ferramentas mesmo que já existam em cache |
+| `--nvd-api-key KEY` | | NVD API key (também via env var `NVD_API_KEY`) |
+| `--compare FILE` | | Comparar com `cve_results.json` de run anterior |
+| `--fail-on LEVEL` | | Exit code != 0 quando há findings (`critical`/`high`/`medium`) |
 
 ### Fases de execução
 
@@ -426,6 +457,7 @@ Checks adicionais específicos de distro: PwnKit (pkexec), overlayfs Ubuntu, run
 | Registry / configuração sensível | LSA, WDigest, UAC, SMBv1, RDP | — |
 | SUID / capabilities | — | ✓ |
 | CVE scan filesystem | Trivy + Grype | Trivy + Grype |
+| Deep scan (secrets + misconfig) | ✓ (`-DeepScan`) | ✓ (`--deep-scan`) |
 | Lock files (OSV) | ✓ | ✓ |
 | SBOM (CycloneDX) | ✓ | ✓ |
 | Patch gap — SO | WES-NG + MSRC API | LES2 + distro security updates |
