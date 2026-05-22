@@ -283,7 +283,7 @@ powershell -ExecutionPolicy Bypass -File windows-full-audit.ps1 -Output C:\audit
 
 Verificação offline de CVEs Windows de alto impacto, comparando hotfixes instalados:
 
-`CVE-2025-21333/34/35` · `CVE-2025-24983` · `CVE-2025-26633` · `CVE-2024-38080` · `CVE-2024-21338` · `CVE-2023-28252` · `CVE-2022-21999` · `CVE-2021-34527` (PrintNightmare) · `CVE-2021-36934` (HiveNightmare) · `CVE-2020-0796` (SMBGhost) · `CVE-2020-1472` (ZeroLogon) · `CVE-2019-0708` (BlueKeep) · `CVE-2017-0144` (EternalBlue)
+`CVE-2026-21533` (RDS EoP) · `CVE-2026-21519` (DWM EoP) · `CVE-2025-21333/34/35` · `CVE-2025-24983` · `CVE-2025-26633` · `CVE-2024-38080` · `CVE-2024-21338` · `CVE-2023-28252` · `CVE-2022-21999` · `CVE-2021-34527` (PrintNightmare) · `CVE-2021-36934` (HiveNightmare) · `CVE-2020-0796` (SMBGhost) · `CVE-2020-1472` (ZeroLogon) · `CVE-2019-0708` (BlueKeep) · `CVE-2017-0144` (EternalBlue)
 
 ### Estrutura de output
 
@@ -415,7 +415,7 @@ sudo bash linux-full-audit.sh --output /tmp/audit
 
 Verificação offline de kernel CVEs de alto impacto, comparando versão do kernel actual com versão de fix:
 
-`CVE-2024-1086` (nf_tables UAF, exploited) · `CVE-2024-0646` (mremap OOB) · `CVE-2023-4623` (sch_hfsc UAF, exploited) · `CVE-2023-32629` + `CVE-2023-2640` (overlayfs Ubuntu, exploited) · `CVE-2023-3389` (io_uring UAF) · `CVE-2022-0847` (Dirty Pipe, exploited) · `CVE-2022-0185` (fsconfig heap overflow) · `CVE-2021-4034` (PwnKit) · `CVE-2021-22555` (netfilter, exploited) · `CVE-2021-3156` (Baron Samedit sudo) · `CVE-2020-14386` (raw socket LPE) · `CVE-2016-5195` (Dirty COW)
+`CVE-2026-43500` (Dirty Frag RxRPC, exploit público) · `CVE-2026-43284` (Dirty Frag ESP, exploited) · `CVE-2026-31431` (Copy Fail algif_aead, exploited) · `CVE-2024-1086` (nf_tables UAF, exploited) · `CVE-2024-0646` (mremap OOB) · `CVE-2023-4623` (sch_hfsc UAF, exploited) · `CVE-2023-32629` + `CVE-2023-2640` (overlayfs Ubuntu, exploited) · `CVE-2023-3389` (io_uring UAF) · `CVE-2022-0847` (Dirty Pipe, exploited) · `CVE-2022-0185` (fsconfig heap overflow) · `CVE-2021-4034` (PwnKit) · `CVE-2021-22555` (netfilter, exploited) · `CVE-2021-3156` (Baron Samedit sudo) · `CVE-2020-14386` (raw socket LPE) · `CVE-2016-5195` (Dirty COW)
 
 Checks adicionais específicos de distro: PwnKit (pkexec), overlayfs Ubuntu, runc CVE-2024-21626 (Leaky Vessels).
 

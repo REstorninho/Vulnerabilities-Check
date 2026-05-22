@@ -1071,6 +1071,9 @@ check_cve() {
     fi
 }
 
+check_cve "CVE-2026-43500" "CRÍTICO" "Dirty Frag — RxRPC page-cache write (LPE, exploit público)"  "7.1.0"  "Sem patch upstream ainda — desactivar rxrpc como mitigação"
+check_cve "CVE-2026-43284" "CRÍTICO" "Dirty Frag — ESP/xfrm page-cache write (LPE, exploit público)" "7.1.0"  "Exploited in-the-wild — desactivar esp4/esp6 como mitigação"
+check_cve "CVE-2026-31431" "CRÍTICO" "Copy Fail — algif_aead LPE (732 bytes to root, exploit público)" "6.18.22" "Exploited in-the-wild — afecta todos os kernels desde 2017"
 check_cve "CVE-2024-1086"  "CRÍTICO" "nf_tables use-after-free (LPE/container escape)" "6.6.15" "Exploited in-the-wild"
 check_cve "CVE-2024-0646"  "CRÍTICO" "mremap() out-of-bounds write"                    "6.6.6"  "Kernel memory corruption LPE"
 check_cve "CVE-2024-26581" "HIGH"    "nft_set_rbtree UAF"                               "6.7.3"  "netfilter UAF"

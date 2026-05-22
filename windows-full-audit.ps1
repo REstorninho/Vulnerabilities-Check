@@ -1108,6 +1108,8 @@ if (Test-Path $WatsonBin) {
     $patchOut.Add("[Watson não disponível — checks inline]"); $patchOut.Add("")
     function Test-KB { param([string]$KB); return ($hotfixes -contains $KB) }
     $knownCves = @(
+        [PSCustomObject]@{ CVE="CVE-2026-21533"; Sev="CRÍTICO"; Name="Remote Desktop Services EoP (exploited)";      KB=@("KB5075899","KB5075912","KB5075941","KB5075999"); MinBuild=0 }
+        [PSCustomObject]@{ CVE="CVE-2026-21519"; Sev="CRÍTICO"; Name="Desktop Window Manager EoP (exploited)";       KB=@("KB5075899","KB5075912","KB5075941","KB5075999"); MinBuild=0 }
         [PSCustomObject]@{ CVE="CVE-2025-21333"; Sev="CRÍTICO"; Name="Hyper-V NT Kernel EoP (exploited)"; KB=@("KB5050009","KB5050011","KB5050013","KB5050014"); MinBuild=19041 }
         [PSCustomObject]@{ CVE="CVE-2025-24983"; Sev="HIGH";    Name="Win32k UAF EoP (exploited)";       KB=@("KB5053598","KB5053599"); MinBuild=0 }
         [PSCustomObject]@{ CVE="CVE-2025-26633"; Sev="HIGH";    Name="MSC EvilTwin (exploited)";         KB=@("KB5053598","KB5053599"); MinBuild=0 }
